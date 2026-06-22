@@ -1,0 +1,8 @@
+﻿<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/XPoint.Staking.Backend/XPoint.Staking.Backend.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/XPoint.Staking.Backend.Tests/XPoint.Staking.Backend.Tests.csproj" />
+  </Folder>
+</Solution>

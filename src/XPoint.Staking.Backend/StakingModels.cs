@@ -81,6 +81,7 @@ public sealed record BackendContractOptions
     public long ChainId { get; init; } = 42_161;
     public string NetworkName { get; init; } = "mainnet";
     public string EthereumRpcUrl { get; init; } = "";
+    public string EthereumFallbackRpcUrls { get; init; } = "";
     public string TokenAddress { get; init; } = "";
     public string ServiceNodeRewardsAddress { get; init; } = "";
     public string ServiceNodeContributionFactoryAddress { get; init; } = "";
@@ -107,6 +108,7 @@ public sealed record BackendPriceOptions
     public string VsCurrency { get; init; } = "usd";
 
     public string EthereumRpcUrl { get; init; } = "https://arb1.arbitrum.io/rpc";
+    public string EthereumFallbackRpcUrls { get; init; } = "";
 
     public string UniswapPoolAddress { get; init; } = "0x5d42A2b90867B813B753f5B49877Ea7c6bB2B603";
 

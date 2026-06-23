@@ -74,6 +74,7 @@ public sealed class RewardStateService
             var data = selector + normalizedAddress[2..].PadLeft(64, '0');
             var result = await _rpc.EthCallAsync(
                 options.EthereumRpcUrl,
+                options.EthereumFallbackRpcUrls,
                 options.ServiceNodeRewardsAddress,
                 data,
                 cancellationToken).ConfigureAwait(false);

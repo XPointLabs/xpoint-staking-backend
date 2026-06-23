@@ -87,24 +87,27 @@ public sealed class PriceFeedService
         var poolAddress = NormalizeAddress(options.UniswapPoolAddress);
         var baseTokenAddress = NormalizeAddress(options.BaseTokenAddress);
         var quoteTokenAddress = NormalizeAddress(options.QuoteTokenAddress);
+        var rpcUrls = EthereumJsonRpcClient.BuildRpcUrls(
+            options.EthereumRpcUrl,
+            options.EthereumFallbackRpcUrls);
 
         var token0 = DecodeAddress(await EthCallAsync(
-            options.EthereumRpcUrl,
+            rpcUrls,
             poolAddress,
             Token0Selector,
             cancellationToken).ConfigureAwait(false));
         var token1 = DecodeAddress(await EthCallAsync(
-            options.EthereumRpcUrl,
+            rpcUrls,
             poolAddress,
             Token1Selector,
             cancellationToken).ConfigureAwait(false));
         var slot0 = await EthCallAsync(
-            options.EthereumRpcUrl,
+            rpcUrls,
             poolAddress,
             Slot0Selector,
             cancellationToken).ConfigureAwait(false);
-        var decimals0 = await ReadDecimalsAsync(options.EthereumRpcUrl, token0, cancellationToken).ConfigureAwait(false);
-        var decimals1 = await ReadDecimalsAsync(options.EthereumRpcUrl, token1, cancellationToken).ConfigureAwait(false);
+        var decimals0 = await ReadDecimalsAsync(rpcUrls, token0, cancellationToken).ConfigureAwait(false);
+        var decimals1 = await ReadDecimalsAsync(rpcUrls, token1, cancellationToken).ConfigureAwait(false);
 
         var sqrtPriceX96 = ReadUInt256Word(slot0);
         if (sqrtPriceX96 <= BigInteger.Zero)
@@ -129,12 +132,12 @@ public sealed class PriceFeedService
     }
 
     private async Task<int> ReadDecimalsAsync(
-        string rpcUrl,
+        IReadOnlyList<string> rpcUrls,
         string tokenAddress,
         CancellationToken cancellationToken)
     {
         var result = await EthCallAsync(
-            rpcUrl,
+            rpcUrls,
             tokenAddress,
             DecimalsSelector,
             cancellationToken).ConfigureAwait(false);
@@ -148,7 +151,7 @@ public sealed class PriceFeedService
     }
 
     private async Task<string> EthCallAsync(
-        string rpcUrl,
+        IReadOnlyList<string> rpcUrls,
         string to,
         string data,
         CancellationToken cancellationToken)
@@ -165,28 +168,55 @@ public sealed class PriceFeedService
             }
         });
 
-        using var content = new StringContent(payload, Encoding.UTF8, "application/json");
-        using var response = await _httpClient.PostAsync(rpcUrl, content, cancellationToken).ConfigureAwait(false);
-        var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode)
+        if (rpcUrls.Count == 0)
         {
             throw new PriceFeedUnavailableException(
-                $"Arbitrum RPC returned HTTP {(int)response.StatusCode}: {TrimBody(body)}");
+                "Price provider is not configured. Set Price:EthereumRpcUrl.");
         }
 
-        using var document = JsonDocument.Parse(body);
-        if (document.RootElement.TryGetProperty("error", out var error))
+        PriceFeedUnavailableException? lastTransient = null;
+        foreach (var rpcUrl in rpcUrls)
         {
-            throw new PriceFeedUnavailableException($"Arbitrum RPC eth_call failed: {error}");
+            using var content = new StringContent(payload, Encoding.UTF8, "application/json");
+            using var response = await _httpClient.PostAsync(rpcUrl, content, cancellationToken).ConfigureAwait(false);
+            var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                var exception = new PriceFeedUnavailableException(
+                    $"Arbitrum RPC returned HTTP {(int)response.StatusCode}: {TrimBody(body)}");
+                if (IsTransient(response.StatusCode))
+                {
+                    lastTransient = exception;
+                    continue;
+                }
+
+                throw exception;
+            }
+
+            using var document = JsonDocument.Parse(body);
+            if (document.RootElement.TryGetProperty("error", out var error))
+            {
+                var exception = new PriceFeedUnavailableException($"Arbitrum RPC eth_call failed: {error}");
+                if (IsTransientJsonRpcError(error))
+                {
+                    lastTransient = exception;
+                    continue;
+                }
+
+                throw exception;
+            }
+
+            var result = document.RootElement.GetProperty("result").GetString();
+            if (string.IsNullOrWhiteSpace(result) || result == "0x")
+            {
+                throw new PriceFeedUnavailableException("Arbitrum RPC eth_call returned no data.");
+            }
+
+            return result;
         }
 
-        var result = document.RootElement.GetProperty("result").GetString();
-        if (string.IsNullOrWhiteSpace(result) || result == "0x")
-        {
-            throw new PriceFeedUnavailableException("Arbitrum RPC eth_call returned no data.");
-        }
-
-        return result;
+        throw lastTransient
+            ?? new PriceFeedUnavailableException("All configured Arbitrum RPC endpoints failed.");
     }
 
     private BackendPriceOptions RequireConfiguredOptions()
@@ -303,6 +333,31 @@ public sealed class PriceFeedService
     private static string TrimBody(string body)
     {
         return body.Length <= 240 ? body : body[..240] + "...";
+    }
+
+    private static bool IsTransient(System.Net.HttpStatusCode statusCode)
+    {
+        var code = (int)statusCode;
+        return statusCode == System.Net.HttpStatusCode.TooManyRequests
+            || statusCode == System.Net.HttpStatusCode.RequestTimeout
+            || code >= 500;
+    }
+
+    private static bool IsTransientJsonRpcError(JsonElement error)
+    {
+        if (error.TryGetProperty("code", out var code)
+            && code.ValueKind == JsonValueKind.Number
+            && code.TryGetInt32(out var numericCode)
+            && (numericCode == 429 || numericCode == -32005))
+        {
+            return true;
+        }
+
+        var message = error.ToString();
+        return message.Contains("rate", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("too many", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("timeout", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("temporar", StringComparison.OrdinalIgnoreCase);
     }
 
     private sealed record UniswapPriceSnapshot(

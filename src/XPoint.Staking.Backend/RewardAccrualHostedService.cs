@@ -63,6 +63,7 @@ public sealed class RewardAccrualHostedService : BackgroundService
 
         var rewardRateHex = await _rpc.EthCallAsync(
             options.EthereumRpcUrl,
+            options.EthereumFallbackRpcUrls,
             options.RewardRatePoolAddress,
             RewardRateSelector,
             cancellationToken).ConfigureAwait(false);

@@ -1,4 +1,5 @@
-﻿using XPoint.Staking.Backend;
+using System.Text;
+using XPoint.Staking.Backend;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -256,7 +257,11 @@ app.MapGet("/registrations/{key}", async (
     Registrations = await registrations.GetRegistrationsAsync(key, cancellationToken)
 }));
 
+app.MapPost("/rpc/arbitrum", ForwardArbitrumRpc);
+
 var api = app.MapGroup("/api");
+
+api.MapPost("/rpc/arbitrum", ForwardArbitrumRpc);
 
 api.MapPost("/events", (ChainEvent request, EventIndexer indexer) =>
 {
@@ -360,6 +365,35 @@ static bool TryParsePricePeriod(string period, out int days)
     return days > 0;
 }
 
+static async Task<IResult> ForwardArbitrumRpc(
+    HttpContext context,
+    Microsoft.Extensions.Options.IOptions<BackendContractOptions> options,
+    EthereumJsonRpcClient rpc,
+    CancellationToken cancellationToken)
+{
+    using var reader = new StreamReader(context.Request.Body, Encoding.UTF8);
+    var payload = await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+    if (string.IsNullOrWhiteSpace(payload))
+    {
+        return Results.BadRequest(new { error = "JSON-RPC request body is required." });
+    }
+
+    try
+    {
+        var result = await rpc.ForwardJsonRpcAsync(
+            options.Value.EthereumRpcUrl,
+            options.Value.EthereumFallbackRpcUrls,
+            payload,
+            cancellationToken).ConfigureAwait(false);
+
+        return Results.Content(result.Body, result.ContentType, statusCode: result.StatusCode);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+}
+
 static object ToPublicContractOptions(BackendContractOptions options)
 {
     return new
@@ -378,6 +412,7 @@ static object ToPublicContractOptions(BackendContractOptions options)
         options.RewardPulseSeconds,
         options.QuorumSignatureTimeoutSeconds,
         EthereumRpcUrl = string.IsNullOrWhiteSpace(options.EthereumRpcUrl) ? "" : "configured",
+        EthereumFallbackRpcUrls = string.IsNullOrWhiteSpace(options.EthereumFallbackRpcUrls) ? "" : "configured",
         QuorumSignerDiscovery = "chain-active-obligation-gated-registry-endpoints"
     };
 }

@@ -26,7 +26,7 @@ public sealed class RegistryRegistrationClient
         }
 
         var nodes = await _httpClient.GetFromJsonAsync<IReadOnlyList<RegistryNodeDto>>(
-            "api/nodes",
+            "api/internal/nodes",
             cancellationToken).ConfigureAwait(false);
 
         if (nodes is null || nodes.Count == 0)
@@ -67,7 +67,7 @@ public sealed class RegistryRegistrationClient
         }
 
         var nodes = await _httpClient.GetFromJsonAsync<IReadOnlyList<RegistryNodeDto>>(
-            "api/nodes",
+            "api/internal/nodes",
             cancellationToken).ConfigureAwait(false);
 
         if (nodes is null || nodes.Count == 0)

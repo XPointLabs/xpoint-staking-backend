@@ -291,7 +291,7 @@ public sealed class StakingBackendTests
     }
 
     [Fact]
-    public async Task NetworkQuorumSigning_UsesRewardEligibleObligationsInsteadOfRegistryMembership()
+    public async Task NetworkQuorumSigning_UsesOnChainActiveSignerSetEvenWhenNodeIsNotRewardEligible()
     {
         var blsPublicKey = new string('d', 256);
         var now = DateTimeOffset.UtcNow;
@@ -333,8 +333,51 @@ public sealed class StakingBackendTests
                 "0x1111111111111111111111111111111111111111",
                 CancellationToken.None));
 
-        Assert.Contains("reward-eligible", ex.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.Equal(0, signerHandler.RequestCount);
+        Assert.Contains("No service nodes returned", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(1, signerHandler.RequestCount);
+    }
+
+    [Fact]
+    public async Task NetworkQuorumSigning_RefusesWhenCollectedSignaturesDoNotMeetThreshold()
+    {
+        var blsKeys = new[]
+        {
+            new string('a', 256),
+            new string('b', 256),
+            new string('c', 256)
+        };
+        using var harness = CreateQuorumHarness(blsKeys);
+        var signerHandler = new SelectiveSignerHandler(blsKeys[0]);
+        using var signerHttp = new HttpClient(signerHandler);
+        using var rpcHttp = new HttpClient(new ThrowingRequestHandler());
+        var options = new BackendContractOptions
+        {
+            QuorumNonSignerThresholdMax = 4000
+        };
+        var rewards = new RewardStateService(
+            harness.Indexer,
+            new EthereumJsonRpcClient(rpcHttp),
+            Options.Create(options),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<RewardStateService>.Instance);
+        var signer = new NetworkBlsRewardSignatureService(
+            harness.Indexer,
+            rewards,
+            harness.Registry,
+            harness.Service,
+            signerHttp,
+            new TestOptionsMonitor<BackendContractOptions>(options),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<NetworkBlsRewardSignatureService>.Instance);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            signer.CreateRewardsSignatureAsync(
+                "0x1111111111111111111111111111111111111111",
+                CancellationToken.None));
+
+        Assert.Contains("Insufficient quorum signatures", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(3, signerHandler.RequestCount);
+        Assert.Equal(3, signerHandler.PolicyQuotes.Count);
+        Assert.Single(signerHandler.PolicyQuotes.Distinct(StringComparer.OrdinalIgnoreCase));
+        Assert.All(signerHandler.PolicyQuotes, quote => Assert.False(string.IsNullOrWhiteSpace(quote)));
     }
 
     [Fact]
@@ -722,6 +765,48 @@ public sealed class StakingBackendTests
         var rewards = await client.GetFromJsonAsync<JsonElement>($"/api/staking/rewards/{wallet}");
         Assert.Equal("XPNT", rewards.GetProperty("tokenSymbol").GetString());
         Assert.Equal(35_000L, rewards.GetProperty("claimableRewardsAtomic").GetInt64());
+    }
+
+    [Fact]
+    public async Task RewardSigningQuote_FreezesAmountForRecipient()
+    {
+        var statePath = Path.Combine(Path.GetTempPath(), $"xpoint-staking-quote-{Guid.NewGuid():N}.json");
+        const string wallet = "0x1111111111111111111111111111111111111111";
+
+        try
+        {
+            var indexer = new EventIndexer(Options.Create(new BackendContractOptions
+            {
+                StatePath = statePath
+            }));
+            indexer.ApplyRewardStateFromChain(wallet, 123_000L, 0);
+
+            using var rpcHttp = new HttpClient(new ThrowingRequestHandler());
+            var service = new RewardStateService(
+                indexer,
+                new EthereumJsonRpcClient(rpcHttp),
+                Options.Create(new BackendContractOptions()),
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<RewardStateService>.Instance);
+
+            var quote = await service.CreateRewardSigningQuoteAsync(wallet, CancellationToken.None);
+            indexer.ApplyRewardStateFromChain(wallet, 124_000L, 0);
+
+            var sameRecipient = service.GetRewardSigningQuote(wallet.ToUpperInvariant(), quote.QuoteId);
+            var otherRecipient = service.GetRewardSigningQuote(
+                "0x2222222222222222222222222222222222222222",
+                quote.QuoteId);
+
+            Assert.NotNull(sameRecipient);
+            Assert.Equal(123_000L, sameRecipient!.AmountAtomic);
+            Assert.Null(otherRecipient);
+        }
+        finally
+        {
+            if (File.Exists(statePath))
+            {
+                File.Delete(statePath);
+            }
+        }
     }
 
     [Fact]
@@ -1375,6 +1460,92 @@ public sealed class StakingBackendTests
         return new ObligationHarness(statePath, http, indexer, registry, service);
     }
 
+    private static ObligationHarness CreateQuorumHarness(IReadOnlyList<string> blsPublicKeys)
+    {
+        var statePath = Path.Combine(Path.GetTempPath(), $"deep-quorum-{Guid.NewGuid():N}.json");
+        var indexer = new EventIndexer(Options.Create(new BackendContractOptions
+        {
+            StatePath = statePath
+        }));
+        for (var i = 0; i < blsPublicKeys.Count; i++)
+        {
+            var nodeId = i + 1;
+            indexer.Ingest(new ChainEvent
+            {
+                ChainId = 31337,
+                BlockNumber = nodeId,
+                TransactionHash = $"0xnode-created-{nodeId}",
+                LogIndex = 0,
+                Address = "0xrewards",
+                Name = "NewServiceNodeV2",
+                Args = Args(new
+                {
+                    serviceNodeID = nodeId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    blsData = blsPublicKeys[i],
+                    serviceNode = new { serviceNodePubkey = nodeId.ToString(System.Globalization.CultureInfo.InvariantCulture), fee = 0 },
+                    contributors = new[]
+                    {
+                        new
+                        {
+                            staker = new
+                            {
+                                addr = "0x1111111111111111111111111111111111111111",
+                                beneficiary = "0x1111111111111111111111111111111111111111"
+                            },
+                            stakedAmount = 20_000L * 1_000_000_000L
+                        }
+                    }
+                })
+            });
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var registryJson = JsonSerializer.Serialize(
+            blsPublicKeys.Select((key, index) => new
+            {
+                nodeId = new string('0', 63) + (index + 1).ToString(System.Globalization.CultureInfo.InvariantCulture),
+                operatorAddress = "0x1111111111111111111111111111111111111111",
+                rewardsAddress = "0x1111111111111111111111111111111111111111",
+                blsPublicKey = new { data = key },
+                ed25519PublicKey = new string('0', 63) + (index + 1).ToString(System.Globalization.CultureInfo.InvariantCulture),
+                signingEndpoint = $"http://xnode-{index + 1}:8080/api/staking/quorum/sign",
+                transportStatus = new
+                {
+                    enabled = true,
+                    running = true,
+                    degraded = false,
+                    mode = "running",
+                    mocked = false,
+                    restartCount = 0,
+                    consecutiveFailures = 0
+                },
+                transportHealthySince = now.AddMinutes(-5),
+                transportUnhealthySince = (DateTimeOffset?)null,
+                updatedAt = now
+            }).ToArray(),
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        var http = new HttpClient(new StubHandler(registryJson))
+        {
+            BaseAddress = new Uri("http://registry/")
+        };
+        var registry = new RegistryRegistrationClient(
+            http,
+            Options.Create(new BackendRegistryOptions { BaseUrl = "http://registry/" }));
+        var service = new ServiceNodeObligationService(
+            indexer,
+            registry,
+            Options.Create(new BackendRegistryOptions
+            {
+                BaseUrl = "http://registry/",
+                HeartbeatGraceSeconds = 120,
+                DecommissionGraceSeconds = 300,
+                LiquidationGraceSeconds = 600
+            }),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<ServiceNodeObligationService>.Instance);
+        return new ObligationHarness(statePath, http, indexer, registry, service);
+    }
+
     private static Dictionary<string, JsonElement> Args(object value)
     {
         return JsonSerializer.SerializeToElement(value, new JsonSerializerOptions(JsonSerializerDefaults.Web))
@@ -1502,6 +1673,53 @@ public sealed class StakingBackendTests
         {
             RequestCount++;
             throw new InvalidOperationException("Unexpected HTTP request during test.");
+        }
+    }
+
+    private sealed class SelectiveSignerHandler : HttpMessageHandler
+    {
+        private readonly string _signedBlsPublicKey;
+
+        public SelectiveSignerHandler(string signedBlsPublicKey)
+        {
+            _signedBlsPublicKey = signedBlsPublicKey;
+        }
+
+        public int RequestCount { get; private set; }
+        public List<string> PolicyQuotes { get; } = new();
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            RequestCount++;
+            var body = await request.Content!.ReadAsStringAsync(cancellationToken);
+            using var document = JsonDocument.Parse(body);
+            var amount = document.RootElement.GetProperty("amount").GetInt64();
+            PolicyQuotes.Add(document.RootElement.GetProperty("policyQuote").GetString() ?? "");
+            var host = request.RequestUri?.Host ?? "";
+            if (!string.Equals(host, "xnode-1", StringComparison.OrdinalIgnoreCase))
+            {
+                return new HttpResponseMessage(System.Net.HttpStatusCode.ServiceUnavailable)
+                {
+                    Content = new StringContent("{}")
+                };
+            }
+
+            var json = JsonSerializer.Serialize(new
+            {
+                type = "reward",
+                nodeId = new string('0', 63) + "1",
+                blsPublicKey = _signedBlsPublicKey,
+                amount,
+                timestamp = 0,
+                msgToSign = "aa",
+                signature = "bb"
+            }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json")
+            };
         }
     }
 

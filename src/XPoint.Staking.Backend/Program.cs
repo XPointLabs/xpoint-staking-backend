@@ -298,6 +298,17 @@ api.MapGet("/staking/rewards/{address}", async (
     return Results.Ok(await rewards.GetRewardsAsync(address, cancellationToken));
 });
 
+api.MapGet("/staking/rewards/{address}/quotes/{quoteId}", (
+    string address,
+    string quoteId,
+    RewardStateService rewards) =>
+{
+    var quote = rewards.GetRewardSigningQuote(address, quoteId);
+    return quote is null
+        ? Results.NotFound(new { error = "reward quote not found or expired" })
+        : Results.Ok(quote);
+});
+
 api.MapGet("/staking/state/{nodeId}", (string nodeId, EventIndexer indexer) =>
 {
     var node = indexer.GetNode(nodeId);
@@ -411,6 +422,7 @@ static object ToPublicContractOptions(BackendContractOptions options)
         options.RewardAccrualIntervalSeconds,
         options.RewardPulseSeconds,
         options.QuorumSignatureTimeoutSeconds,
+        options.QuorumNonSignerThresholdMax,
         EthereumRpcUrl = string.IsNullOrWhiteSpace(options.EthereumRpcUrl) ? "" : "configured",
         EthereumFallbackRpcUrls = string.IsNullOrWhiteSpace(options.EthereumFallbackRpcUrls) ? "" : "configured",
         QuorumSignerDiscovery = "chain-active-obligation-gated-registry-endpoints"

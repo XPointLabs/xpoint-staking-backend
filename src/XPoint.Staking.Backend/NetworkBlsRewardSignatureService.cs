@@ -1,7 +1,9 @@
 ﻿using System.Net.Http.Json;
+using System.Text;
+using System.Text.Json;
 using System.Text.Json.Serialization;
-using Neo.Cryptography.BLS12_381;
 using Microsoft.Extensions.Options;
+using Neo.Cryptography.BLS12_381;
 
 namespace XPoint.Staking.Backend;
 
@@ -40,17 +42,17 @@ public sealed class NetworkBlsRewardSignatureService
         CancellationToken cancellationToken)
     {
         var normalizedAddress = EthereumJsonRpcClient.NormalizeAddress(address);
-        var amount = await _rewards.GetRewardSignatureAmountAsync(normalizedAddress, cancellationToken)
+        var quote = await _rewards.CreateRewardSigningQuoteAsync(normalizedAddress, cancellationToken)
             .ConfigureAwait(false);
         var signature = await CreateNetworkSignatureAsync(
             _options.CurrentValue,
-            new NodeQuorumSignatureRequest("reward", normalizedAddress, amount, "", 0),
+            new NodeQuorumSignatureRequest("reward", normalizedAddress, quote.AmountAtomic, quote.QuoteId, "", 0),
             cancellationToken).ConfigureAwait(false);
         var network = _indexer.GetNetworkInfo();
         return new RewardsSignatureDto
         {
             AggregatePublicKey = _indexer.GetAggregatePublicKeyHint(),
-            Amount = amount,
+            Amount = quote.AmountAtomic,
             Height = network.BlockHeight,
             MessageToSign = signature.MessageToSign,
             NonSignerIndices = signature.NonSignerIndices,
@@ -91,6 +93,7 @@ public sealed class NetworkBlsRewardSignatureService
                 liquidate ? "liquidate" : "exit",
                 "",
                 0,
+                "",
                 normalizedPublicKey,
                 timestamp),
             cancellationToken).ConfigureAwait(false);
@@ -116,22 +119,12 @@ public sealed class NetworkBlsRewardSignatureService
             throw new InvalidOperationException("No active service node BLS keys are available for quorum signing.");
         }
 
-        var obligationStatuses = await _obligations.GetStatusesAsync(cancellationToken).ConfigureAwait(false);
-        var rewardEligibleBlsKeys = obligationStatuses
-            .Where(static status => status.RewardEligible)
-            .Select(static status => NormalizeHex(status.BlsPublicKey))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        if (rewardEligibleBlsKeys.Count == 0)
-        {
-            throw new InvalidOperationException("No reward-eligible service node BLS keys are available for quorum signing.");
-        }
-
         var signingNodes = await _registry.GetSigningNodesAsync(cancellationToken).ConfigureAwait(false);
         var activeSigningNodes = new List<RegistrySigningNode>();
         foreach (var node in signingNodes)
         {
             var publicKey = NormalizeHex(node.BlsPublicKey);
-            if (activeBlsKeys.ContainsKey(publicKey) && rewardEligibleBlsKeys.Contains(publicKey))
+            if (activeBlsKeys.ContainsKey(publicKey))
             {
                 activeSigningNodes.Add(node with { BlsPublicKey = publicKey });
             }
@@ -139,7 +132,7 @@ public sealed class NetworkBlsRewardSignatureService
 
         if (activeSigningNodes.Count == 0)
         {
-            throw new InvalidOperationException("No registry-published signing endpoints matched reward-eligible active service node BLS keys.");
+            throw new InvalidOperationException("No registry-published signing endpoints matched active service node BLS keys.");
         }
 
         var timeout = TimeSpan.FromSeconds(Math.Max(1, options.QuorumSignatureTimeoutSeconds));
@@ -196,11 +189,155 @@ public sealed class NetworkBlsRewardSignatureService
             .Where(nodeId => !signedNodeIds.Contains(nodeId))
             .Order()
             .ToArray();
+        var maxNonSigners = await GetMaxPermittedNonSignersAsync(
+            options,
+            activeBlsKeys.Count,
+            cancellationToken).ConfigureAwait(false);
+        if (nonSignerIndices.Length > maxNonSigners)
+        {
+            throw new InvalidOperationException(
+                $"Insufficient quorum signatures: {validSignatures.Count}/{activeBlsKeys.Count} active nodes signed; {nonSignerIndices.Length} non-signers exceeds threshold {maxNonSigners}.");
+        }
 
         return new QuorumAggregateSignature(
             messageToSign ?? "",
             nonSignerIndices,
             AggregateSignatures(validSignatures.Select(item => item.Signature)));
+    }
+
+    private async Task<int> GetMaxPermittedNonSignersAsync(
+        BackendContractOptions options,
+        int activeNodeCount,
+        CancellationToken cancellationToken)
+    {
+        if (options.QuorumNonSignerThresholdMax <= 0)
+        {
+            throw new InvalidOperationException("Contracts:QuorumNonSignerThresholdMax must be positive.");
+        }
+
+        if (string.IsNullOrWhiteSpace(options.EthereumRpcUrl)
+            || string.IsNullOrWhiteSpace(options.ServiceNodeRewardsAddress))
+        {
+            return CalculateMaxPermittedNonSigners(activeNodeCount, options.QuorumNonSignerThresholdMax);
+        }
+
+        var selector = Epoche.Keccak256.ComputeEthereumFunctionSelector("blsNonSignerThreshold()", true);
+        var result = await EthCallAsync(
+            options.EthereumRpcUrl,
+            options.EthereumFallbackRpcUrls,
+            options.ServiceNodeRewardsAddress,
+            selector,
+            cancellationToken).ConfigureAwait(false);
+        var contractThreshold = DecodeUInt256AsInt(result);
+        var localThreshold = CalculateMaxPermittedNonSigners(activeNodeCount, options.QuorumNonSignerThresholdMax);
+        if (contractThreshold > localThreshold)
+        {
+            _logger.LogWarning(
+                "Contract blsNonSignerThreshold {ContractThreshold} exceeds locally calculated threshold {LocalThreshold}; enforcing the stricter local threshold.",
+                contractThreshold,
+                localThreshold);
+            return localThreshold;
+        }
+
+        return contractThreshold;
+    }
+
+    private static int CalculateMaxPermittedNonSigners(int activeNodeCount, int configuredMax)
+    {
+        var oneThirdOfNodes = Math.Max(0, activeNodeCount) / 3;
+        return Math.Min(oneThirdOfNodes, configuredMax);
+    }
+
+    private async Task<string> EthCallAsync(
+        string primaryRpcUrl,
+        string fallbackRpcUrls,
+        string to,
+        string data,
+        CancellationToken cancellationToken)
+    {
+        var rpcUrls = new List<string>();
+        AddIfPresent(primaryRpcUrl);
+        foreach (var item in fallbackRpcUrls.Split(
+            new[] { ',', ';', '\r', '\n', '\t', ' ' },
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            AddIfPresent(item);
+        }
+
+        var payload = JsonSerializer.Serialize(new
+        {
+            jsonrpc = "2.0",
+            id = 1,
+            method = "eth_call",
+            @params = new object[]
+            {
+                new { to = EthereumJsonRpcClient.NormalizeAddress(to), data },
+                "latest"
+            }
+        });
+
+        Exception? lastException = null;
+        foreach (var rpcUrl in rpcUrls)
+        {
+            try
+            {
+                using var content = new StringContent(payload, Encoding.UTF8, "application/json");
+                using var response = await _httpClient.PostAsync(rpcUrl, content, cancellationToken)
+                    .ConfigureAwait(false);
+                response.EnsureSuccessStatusCode();
+
+                using var document = await JsonDocument.ParseAsync(
+                    await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false),
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                if (document.RootElement.TryGetProperty("error", out var error))
+                {
+                    throw new InvalidOperationException($"Ethereum RPC eth_call failed: {error}");
+                }
+
+                var result = document.RootElement.GetProperty("result").GetString();
+                if (string.IsNullOrWhiteSpace(result))
+                {
+                    throw new InvalidOperationException("Ethereum RPC eth_call returned an empty result.");
+                }
+
+                return result;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                lastException = ex;
+            }
+        }
+
+        throw new InvalidOperationException("Ethereum RPC eth_call failed while reading blsNonSignerThreshold().", lastException);
+
+        void AddIfPresent(string? value)
+        {
+            if (!string.IsNullOrWhiteSpace(value)
+                && !rpcUrls.Contains(value.Trim(), StringComparer.OrdinalIgnoreCase))
+            {
+                rpcUrls.Add(value.Trim());
+            }
+        }
+    }
+
+    private static int DecodeUInt256AsInt(string value)
+    {
+        var normalized = NormalizeHex(value);
+        if (normalized.Length < 64)
+        {
+            throw new InvalidOperationException("Ethereum uint256 result was shorter than 32 bytes.");
+        }
+
+        var parsed = System.Numerics.BigInteger.Parse(
+            "0" + normalized[..64],
+            System.Globalization.NumberStyles.HexNumber,
+            System.Globalization.CultureInfo.InvariantCulture);
+        if (parsed > int.MaxValue)
+        {
+            throw new InvalidOperationException("Ethereum uint256 result exceeds Int32.MaxValue.");
+        }
+
+        return (int)parsed;
     }
 
     private async Task<NodeQuorumSignatureResponse?> RequestSignatureAsync(
@@ -470,6 +607,8 @@ public sealed class NetworkBlsRewardSignatureService
         string RecipientAddress,
         [property: JsonPropertyName("amount")]
         long Amount,
+        [property: JsonPropertyName("policyQuote")]
+        string PolicyQuote,
         [property: JsonPropertyName("blsPublicKey")]
         string BlsPublicKey,
         [property: JsonPropertyName("timestamp")]

@@ -95,6 +95,7 @@ public sealed record BackendContractOptions
     public int ExitRequestTimeSeconds { get; init; } = 14 * 24 * 60 * 60;
     public int ChainBlockTimeMilliseconds { get; init; } = 250;
     public int QuorumSignatureTimeoutSeconds { get; init; } = 10;
+    public int QuorumNonSignerThresholdMax { get; init; } = 4000;
 
     public string? StatePath { get; init; }
 }

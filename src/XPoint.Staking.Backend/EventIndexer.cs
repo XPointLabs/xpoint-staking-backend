@@ -1,6 +1,9 @@
 ﻿using System.Collections.Concurrent;
 using System.Globalization;
+using System.Net;
 using System.Numerics;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 
@@ -25,6 +28,7 @@ public sealed class EventIndexer
     private readonly ConcurrentDictionary<string, List<DailyRewardDto>> _dailyRewards = new(StringComparer.OrdinalIgnoreCase);
     private readonly BackendContractOptions _options;
     private readonly string? _statePath;
+    private readonly string _deploymentFingerprint;
     private DateTimeOffset? _lastRewardAccrualAtUtc;
     private long _rewardRemainderAtomicSeconds;
     private long _stakingRequirementAtomic;
@@ -36,6 +40,7 @@ public sealed class EventIndexer
     private long _staleNodeProjectionIgnored;
     private long _staleStatusIgnored;
     private long _corruptedStateRecoveries;
+    private long _staleStateQuarantines;
     private long _statePersistenceFailures;
 
     public EventIndexer(IOptions<BackendContractOptions> options)
@@ -45,6 +50,7 @@ public sealed class EventIndexer
         _statePath = string.IsNullOrWhiteSpace(_options.StatePath)
             ? Path.Combine(AppContext.BaseDirectory, "artifacts", "staking-state.json")
             : _options.StatePath;
+        _deploymentFingerprint = GetDeploymentFingerprint(_options);
 
         LoadState();
     }
@@ -90,6 +96,7 @@ public sealed class EventIndexer
             Interlocked.Read(ref _staleNodeProjectionIgnored),
             Interlocked.Read(ref _staleStatusIgnored),
             Interlocked.Read(ref _corruptedStateRecoveries),
+            Interlocked.Read(ref _staleStateQuarantines),
             Interlocked.Read(ref _statePersistenceFailures),
             _events.Count);
     }
@@ -1213,6 +1220,17 @@ public sealed class EventIndexer
                 return;
             }
 
+            if (!string.Equals(snapshot.DeploymentFingerprint, _deploymentFingerprint, StringComparison.Ordinal))
+            {
+                if (!IsExplicitLocalDevelopment(_options) && HasCompleteContractBinding(_options))
+                {
+                    throw new InvalidOperationException("Persisted staking state does not match the configured deployment fingerprint.");
+                }
+
+                QuarantineStaleStateFile();
+                return;
+            }
+
             foreach (var indexedEvent in snapshot.Events)
             {
                 if (_events.TryAdd(indexedEvent.Id, indexedEvent))
@@ -1281,6 +1299,25 @@ public sealed class EventIndexer
         }
     }
 
+    private void QuarantineStaleStateFile()
+    {
+        if (_statePath is null || !File.Exists(_statePath))
+        {
+            return;
+        }
+
+        try
+        {
+            var backupPath = $"{_statePath}.stale-{DateTimeOffset.UtcNow:yyyyMMddHHmmssfff}.bak";
+            File.Move(_statePath, backupPath, true);
+            Interlocked.Increment(ref _staleStateQuarantines);
+        }
+        catch
+        {
+            // A stale local-dev cache must not make the developer environment unavailable.
+        }
+    }
+
     private void PersistState()
     {
         if (_statePath is null)
@@ -1316,7 +1353,8 @@ public sealed class EventIndexer
                     },
                     StringComparer.OrdinalIgnoreCase),
                 _lastRewardAccrualAtUtc,
-                _rewardRemainderAtomicSeconds);
+                _rewardRemainderAtomicSeconds,
+                _deploymentFingerprint);
 
             try
             {
@@ -1350,7 +1388,56 @@ public sealed class EventIndexer
         IReadOnlyDictionary<string, RewardSnapshot>? Rewards = null,
         IReadOnlyDictionary<string, IReadOnlyList<DailyRewardDto>>? DailyRewards = null,
         DateTimeOffset? LastRewardAccrualAtUtc = null,
-        long RewardRemainderAtomicSeconds = 0);
+        long RewardRemainderAtomicSeconds = 0,
+        string? DeploymentFingerprint = null);
+
+    private static string GetDeploymentFingerprint(BackendContractOptions options)
+    {
+        var value = string.Join("|",
+            options.ChainId.ToString(CultureInfo.InvariantCulture),
+            options.NetworkName.Trim().ToLowerInvariant(),
+            NormalizeAddressForFingerprint(options.TokenAddress),
+            NormalizeAddressForFingerprint(options.ServiceNodeRewardsAddress),
+            NormalizeAddressForFingerprint(options.RewardRatePoolAddress),
+            NormalizeAddressForFingerprint(options.ServiceNodeContributionFactoryAddress),
+            options.DeploymentLifecycleId?.Trim() ?? "");
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+    }
+
+    private static string NormalizeAddressForFingerprint(string address)
+    {
+        try { return EthereumJsonRpcClient.NormalizeAddress(address); }
+        catch (InvalidOperationException) { return address.Trim().ToLowerInvariant(); }
+    }
+
+    private static bool IsExplicitLocalDevelopment(BackendContractOptions options)
+    {
+        if (string.Equals(options.NetworkName, "localdev", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(options.NetworkName, "localhost", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return Uri.TryCreate(options.EthereumRpcUrl, UriKind.Absolute, out var uri)
+            && (string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase)
+                || IPAddress.TryParse(uri.Host, out var ip) && IPAddress.IsLoopback(ip));
+    }
+
+    private static bool HasCompleteContractBinding(BackendContractOptions options)
+    {
+        try
+        {
+            _ = EthereumJsonRpcClient.NormalizeAddress(options.TokenAddress);
+            _ = EthereumJsonRpcClient.NormalizeAddress(options.ServiceNodeRewardsAddress);
+            _ = EthereumJsonRpcClient.NormalizeAddress(options.RewardRatePoolAddress);
+            _ = EthereumJsonRpcClient.NormalizeAddress(options.ServiceNodeContributionFactoryAddress);
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
 
     private sealed record RewardSnapshot(
         long LifetimeRewardsAtomic,

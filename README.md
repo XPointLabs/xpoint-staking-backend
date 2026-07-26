@@ -13,6 +13,8 @@ Session reward/stake semantics at the API projection layer and uses XPoint
 ## Endpoints
 
 - `GET /info`
+- `GET /health/live`
+- `GET /health/ready`
 - `POST /api/events`
 - `GET /api/events`
 - `GET /api/events/stats`
@@ -29,6 +31,7 @@ State persistence behavior:
 - The indexer stores replay-safe state at `Contracts:StatePath` (defaults to `artifacts/staking-state.json` under app base directory).
 - On startup, an invalid/corrupted state file is automatically quarantined to `*.corrupt-<timestamp>.bak` and the service continues with empty in-memory state.
 - `GET /api/events/stats` exposes ingestion counters including duplicate/stale ignores, `corruptedStateRecoveries`, and `statePersistenceFailures`.
+- Every persisted snapshot is bound to a deployment fingerprint (chain, network, four contract addresses, and optional manifest lifecycle ID). A mismatched production snapshot blocks startup; explicit `LocalDev`/`localhost` configurations quarantine it as `*.stale-<timestamp>.bak` and start empty.
 
 ## Recovery (devnet/non-production)
 
@@ -47,10 +50,29 @@ State persistence behavior:
     "ServiceNodeRewardsAddress": "0x...",
     "ServiceNodeContributionFactoryAddress": "0x...",
     "RewardRatePoolAddress": "0x...",
-    "StakingRequirementAtomic": 25000000000000
+    "StakingRequirementAtomic": 25000000000000,
+    "DeploymentManifestPath": "/run/deep-contracts/localhost.latest.json",
+    "ExpectedDeploymentNetwork": "localhost"
   }
 }
 ```
+
+When `Contracts:DeploymentManifestPath` is configured, startup reads it before
+DI and fails closed if it is missing, malformed, has `schemaVersion` other than
+`1`, has a network/chain/config mismatch, or lacks any required contract or
+staking parameter. Its chain ID, network, addresses, staking requirement and
+max contributors are authoritative. The required JSON fields are
+`schemaVersion`, `network`, numeric `chainId`, optional 64-hex `lifecycleId`,
+`contracts.{token,serviceNodeRewards,rewardRatePool,serviceNodeContributionFactory}`
+and `parameters.{stakingRequirement,maxContributors}`. Use
+`Contracts__DeploymentManifestPath` and `Contracts__ExpectedDeploymentNetwork`
+for container configuration.
+
+`/health/live` only reports process liveness. `/health/ready` additionally
+requires valid configured addresses, a matching `eth_chainId`, and non-empty
+`eth_getCode` for token, rewards, pool and factory. It uses a bounded timeout
+(`Contracts:ReadinessTimeoutSeconds`, default 5 seconds) and never returns RPC
+credentials.
 
 Run locally:
 

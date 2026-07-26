@@ -10,6 +10,97 @@ namespace XPoint.Staking.Backend.Tests;
 public sealed class StakingBackendTests
 {
     [Fact]
+    public void DeploymentManifestBinding_LoadsAuthoritativeValuesAndRejectsMismatches()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"staking-manifest-{Guid.NewGuid():N}.json");
+        File.WriteAllText(path, DeploymentManifestJson());
+        try
+        {
+            var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Contracts:DeploymentManifestPath"] = path,
+                ["Contracts:ExpectedDeploymentNetwork"] = "localhost"
+            }).Build();
+            var binding = DeploymentManifestBinding.Load(configuration);
+            Assert.NotNull(binding);
+            Assert.Equal(31337, binding!.ChainId);
+            Assert.Equal("0x1111111111111111111111111111111111111111", binding.TokenAddress);
+            Assert.Equal("100", binding.ToConfigurationOverrides()["Contracts:StakingRequirementAtomic"]);
+
+            var conflict = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Contracts:DeploymentManifestPath"] = path,
+                ["Contracts:ExpectedDeploymentNetwork"] = "localhost",
+                ["Contracts:TokenAddress"] = "0x9999999999999999999999999999999999999999"
+            }).Build();
+            Assert.Throws<InvalidOperationException>(() => DeploymentManifestBinding.Load(conflict));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void DeploymentManifestBinding_FailsClosedForMissingOrCorruptManifest()
+    {
+        var missing = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Contracts:DeploymentManifestPath"] = Path.Combine(Path.GetTempPath(), $"missing-{Guid.NewGuid():N}.json")
+        }).Build();
+        Assert.Throws<InvalidOperationException>(() => DeploymentManifestBinding.Load(missing));
+
+        var path = Path.Combine(Path.GetTempPath(), $"staking-manifest-corrupt-{Guid.NewGuid():N}.json");
+        File.WriteAllText(path, "{");
+        try
+        {
+            var corrupt = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Contracts:DeploymentManifestPath"] = path
+            }).Build();
+            Assert.Throws<InvalidOperationException>(() => DeploymentManifestBinding.Load(corrupt));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public async Task ReadinessProbe_RejectsWrongChainAndMissingContractCode()
+    {
+        var options = Options.Create(ReadinessOptions());
+        using var wrongChainHttp = new HttpClient(new ReadinessRpcHandler("0x1", "0x1234"));
+        var wrongChain = new StakingReadinessProbe(options, new EthereumJsonRpcClient(wrongChainHttp));
+        Assert.False(await wrongChain.IsReadyAsync(CancellationToken.None));
+
+        using var noCodeHttp = new HttpClient(new ReadinessRpcHandler("0x7a69", "0x"));
+        var noCode = new StakingReadinessProbe(options, new EthereumJsonRpcClient(noCodeHttp));
+        Assert.False(await noCode.IsReadyAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public void EventIndexer_QuarantinesStaleLocalStateAndFailsClosedForProduction()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"staking-stale-{Guid.NewGuid():N}.json");
+        try
+        {
+            var local = ReadinessOptions() with { StatePath = path, NetworkName = "LocalDev" };
+            var writer = new EventIndexer(Options.Create(local));
+            writer.Ingest(new ChainEvent { ChainId = 31337, BlockNumber = 1, TransactionHash = "0xstale", LogIndex = 0, Name = "ignored" });
+            var changedLocal = local with { TokenAddress = "0x9999999999999999999999999999999999999999" };
+            var reloaded = new EventIndexer(Options.Create(changedLocal));
+            Assert.Equal(1, reloaded.GetIngestionStats().StaleStateQuarantines);
+            Assert.Empty(reloaded.GetEvents());
+
+            var production = ReadinessOptions() with { StatePath = path, NetworkName = "mainnet" };
+            var productionWriter = new EventIndexer(Options.Create(production));
+            productionWriter.Ingest(new ChainEvent { ChainId = 31337, BlockNumber = 1, TransactionHash = "0xproduction", LogIndex = 0, Name = "ignored" });
+            Assert.Throws<InvalidOperationException>(() => new EventIndexer(Options.Create(production with { TokenAddress = "0x9999999999999999999999999999999999999999" })));
+        }
+        finally
+        {
+            var directory = Path.GetDirectoryName(path)!;
+            var fileName = Path.GetFileName(path);
+            foreach (var file in Directory.GetFiles(directory, $"{fileName}*")) { File.Delete(file); }
+        }
+    }
+
+    [Fact]
     public async Task SessionApi_DoesNotReturnSyntheticPricesWhenProviderIsMissing()
     {
         await using var factory = CreateFactory(new Dictionary<string, string?>
@@ -1574,6 +1665,35 @@ public sealed class StakingBackendTests
         return normalized.PadLeft(64, '0').ToLowerInvariant();
     }
 
+    private static BackendContractOptions ReadinessOptions() => new()
+    {
+        ChainId = 31337,
+        NetworkName = "localhost",
+        EthereumRpcUrl = "http://rpc.test",
+        TokenAddress = "0x1111111111111111111111111111111111111111",
+        ServiceNodeRewardsAddress = "0x2222222222222222222222222222222222222222",
+        RewardRatePoolAddress = "0x3333333333333333333333333333333333333333",
+        ServiceNodeContributionFactoryAddress = "0x4444444444444444444444444444444444444444",
+        StakingRequirementAtomic = 100,
+        MaxStakers = 10
+    };
+
+    private static string DeploymentManifestJson() => """
+        {
+          "schemaVersion": 1,
+          "network": "localhost",
+          "chainId": 31337,
+          "lifecycleId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "contracts": {
+            "token": "0x1111111111111111111111111111111111111111",
+            "serviceNodeRewards": "0x2222222222222222222222222222222222222222",
+            "rewardRatePool": "0x3333333333333333333333333333333333333333",
+            "serviceNodeContributionFactory": "0x4444444444444444444444444444444444444444"
+          },
+          "parameters": { "stakingRequirement": "100", "maxContributors": 10 }
+        }
+        """;
+
     private sealed class ObligationHarness : IDisposable
     {
         private readonly string _statePath;
@@ -1661,6 +1781,29 @@ public sealed class StakingBackendTests
             return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
             {
                 Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json")
+            };
+        }
+    }
+
+    private sealed class ReadinessRpcHandler : HttpMessageHandler
+    {
+        private readonly string _chainId;
+        private readonly string _code;
+
+        public ReadinessRpcHandler(string chainId, string code)
+        {
+            _chainId = chainId;
+            _code = code;
+        }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            using var document = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
+            var method = document.RootElement.GetProperty("method").GetString();
+            var result = method == "eth_chainId" ? _chainId : _code;
+            return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(JsonSerializer.Serialize(new { jsonrpc = "2.0", id = 1, result }), System.Text.Encoding.UTF8, "application/json")
             };
         }
     }

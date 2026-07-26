@@ -39,6 +39,7 @@ public sealed record EventIngestionStats(
     long StaleNodeProjectionIgnored,
     long StaleStatusIgnored,
     long CorruptedStateRecoveries,
+    long StaleStateQuarantines,
     long StatePersistenceFailures,
     long TotalEvents);
 
@@ -82,6 +83,10 @@ public sealed record BackendContractOptions
     public string NetworkName { get; init; } = "mainnet";
     public string EthereumRpcUrl { get; init; } = "";
     public string EthereumFallbackRpcUrls { get; init; } = "";
+    public string? DeploymentManifestPath { get; init; }
+    public string? ExpectedDeploymentNetwork { get; init; }
+    public string? DeploymentLifecycleId { get; init; }
+    public int ReadinessTimeoutSeconds { get; init; } = 5;
     public string TokenAddress { get; init; } = "";
     public string ServiceNodeRewardsAddress { get; init; } = "";
     public string ServiceNodeContributionFactoryAddress { get; init; } = "";

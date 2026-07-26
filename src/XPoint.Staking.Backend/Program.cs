@@ -3,11 +3,19 @@ using XPoint.Staking.Backend;
 
 var builder = WebApplication.CreateBuilder(args);
 
+var deploymentManifest = DeploymentManifestBinding.Load(builder.Configuration);
+if (deploymentManifest is not null)
+{
+    // A configured deployment record is authoritative; validate conflicts before this provider wins.
+    builder.Configuration.AddInMemoryCollection(deploymentManifest.ToConfigurationOverrides());
+}
+
 builder.Services.Configure<BackendContractOptions>(builder.Configuration.GetSection("Contracts"));
 builder.Services.Configure<BackendRegistryOptions>(builder.Configuration.GetSection("Registry"));
 builder.Services.Configure<BackendPriceOptions>(builder.Configuration.GetSection("Price"));
 builder.Services.AddSingleton<EventIndexer>();
 builder.Services.AddHttpClient<EthereumJsonRpcClient>();
+builder.Services.AddSingleton<StakingReadinessProbe>();
 builder.Services.AddHttpClient<PriceFeedService>((services, client) =>
 {
     var options = services.GetRequiredService<Microsoft.Extensions.Options.IOptions<BackendPriceOptions>>().Value;
@@ -40,6 +48,10 @@ var app = builder.Build();
 
 app.MapGet("/", () => Results.Redirect("/info"));
 app.MapGet("/health/live", () => Results.Ok(new { ok = true, service = "xpoint-staking-backend" }));
+app.MapGet("/health/ready", async (StakingReadinessProbe readiness, CancellationToken cancellationToken) =>
+    await readiness.IsReadyAsync(cancellationToken).ConfigureAwait(false)
+        ? Results.Ok(new { ok = true })
+        : Results.StatusCode(StatusCodes.Status503ServiceUnavailable));
 
 app.MapGet("/info", (IConfiguration configuration, EventIndexer indexer) => Results.Ok(new
 {

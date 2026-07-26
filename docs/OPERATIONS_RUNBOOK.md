@@ -7,10 +7,12 @@ This runbook covers replay-safe event ingestion, failure handling, and CI-reprod
 - Event ingest is idempotent by `(chainId, transactionHash, logIndex)`.
 - Out-of-order/delayed events do not regress node projection status or node metadata.
 - Corrupted persisted state is quarantined at startup and does not block service availability.
+- Deployment-bound snapshots fail closed on a fingerprint mismatch outside explicit LocalDev/localhost. Local development quarantines a mismatched snapshot and exposes `staleStateQuarantines`.
 - Persist-write failures are non-fatal; ingestion continues and the failure is visible via metrics.
 
 ## Key Runtime Endpoints
 - `GET /health/live`
+- `GET /health/ready`
 - `POST /api/events`
 - `GET /api/events`
 - `GET /api/events/stats`
@@ -24,6 +26,7 @@ This runbook covers replay-safe event ingestion, failure handling, and CI-reprod
 - `staleNodeProjectionIgnored`
 - `staleStatusIgnored`
 - `corruptedStateRecoveries`
+- `staleStateQuarantines`
 - `statePersistenceFailures`
 - `totalEvents`
 
@@ -31,6 +34,7 @@ Alerting guidance:
 - `corruptedStateRecoveries > 0`: investigate filesystem integrity and recent deployments.
 - `statePersistenceFailures > 0`: investigate permissions, disk saturation, and path correctness.
 - Sustained growth in `stale*Ignored`: review event source ordering guarantees.
+- `staleStateQuarantines > 0`: replay from a trusted checkpoint; do not copy a state file between deployments.
 
 ## Recovery Procedures
 
@@ -50,7 +54,14 @@ Alerting guidance:
 3. Fix path/permissions and restart service.
 4. Replay from trusted checkpoint to rehydrate durable state.
 
-### C. Event Source Ordering Incidents
+### C. Deployment Manifest or Readiness Failure
+1. Keep `/health/live` separate from `/health/ready`; do not route traffic on liveness alone.
+2. Verify `Contracts__DeploymentManifestPath` is readable and that `Contracts__ExpectedDeploymentNetwork` matches the manifest `network` exactly (case-insensitive).
+3. The manifest must have `schemaVersion: 1`, numeric `chainId`, required four contract addresses, `parameters.stakingRequirement`, and `parameters.maxContributors`. Manifest values are authoritative and conflict with configured values fail startup.
+4. Verify the RPC's `eth_chainId` and bytecode at all four addresses. Do not log or paste the RPC URL if it contains credentials.
+5. For a production fingerprint mismatch, retain the old snapshot for forensics and start only after selecting the correct deployment/state or replaying canonical events. Only explicit LocalDev/localhost may auto-quarantine stale state.
+
+### D. Event Source Ordering Incidents
 1. Inspect `staleNodeProjectionIgnored` and `staleStatusIgnored` trends.
 2. Validate producer ordering at source.
 3. If needed, replay from checkpoint to rebuild consistent projections.

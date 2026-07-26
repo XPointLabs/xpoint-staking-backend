@@ -207,6 +207,62 @@ public sealed class EthereumJsonRpcClient
     public static string Strip0x(string value) =>
         value.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? value[2..] : value;
 
+    public async Task<string> EthChainIdAsync(string rpcUrl, string fallbackRpcUrls, CancellationToken cancellationToken) =>
+        await SendForResultAsync(rpcUrl, fallbackRpcUrls, "eth_chainId", Array.Empty<object>(), cancellationToken).ConfigureAwait(false);
+
+    public async Task<string> EthGetCodeAsync(string rpcUrl, string fallbackRpcUrls, string address, CancellationToken cancellationToken) =>
+        await SendForResultAsync(rpcUrl, fallbackRpcUrls, "eth_getCode", new object[] { NormalizeAddress(address), "latest" }, cancellationToken).ConfigureAwait(false);
+
+    private async Task<string> SendForResultAsync(
+        string rpcUrl,
+        string fallbackRpcUrls,
+        string method,
+        object[] parameters,
+        CancellationToken cancellationToken)
+    {
+        var endpoints = BuildRpcUrls(rpcUrl, fallbackRpcUrls);
+        if (endpoints.Count == 0)
+        {
+            throw new InvalidOperationException("Contracts:EthereumRpcUrl is required.");
+        }
+
+        var payload = JsonSerializer.Serialize(new { jsonrpc = "2.0", id = 1, method, @params = parameters });
+        Exception? lastFailure = null;
+        foreach (var endpoint in endpoints)
+        {
+            try
+            {
+                using var content = new StringContent(payload, Encoding.UTF8, "application/json");
+                using var response = await _httpClient.PostAsync(endpoint, content, cancellationToken).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    lastFailure = new HttpRequestException($"{method} returned HTTP {(int)response.StatusCode}.");
+                    continue;
+                }
+
+                using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false));
+                if (document.RootElement.TryGetProperty("error", out _)
+                    || !document.RootElement.TryGetProperty("result", out var result)
+                    || result.ValueKind != JsonValueKind.String)
+                {
+                    lastFailure = new InvalidOperationException($"{method} did not return a result.");
+                    continue;
+                }
+                return result.GetString()!;
+            }
+            catch (Exception ex) when (ex is HttpRequestException or JsonException or TaskCanceledException)
+            {
+                lastFailure = ex;
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+            }
+        }
+
+        throw new InvalidOperationException($"All configured RPC endpoints failed {method}.", lastFailure);
+    }
+
     private static bool IsTransient(System.Net.HttpStatusCode statusCode)
     {
         var code = (int)statusCode;

@@ -56,8 +56,8 @@ Alerting guidance:
 
 ### C. Deployment Manifest or Readiness Failure
 1. Keep `/health/live` separate from `/health/ready`; do not route traffic on liveness alone.
-2. Verify `Contracts__DeploymentManifestPath` is readable and that `Contracts__ExpectedDeploymentNetwork` matches the manifest `network` exactly (case-insensitive).
-3. The manifest must have `schemaVersion: 1`, numeric `chainId`, required four contract addresses, `parameters.stakingRequirement`, and `parameters.maxContributors`. Manifest values are authoritative and conflict with configured values fail startup.
+2. Verify `Contracts__DeploymentManifestPath` is readable and that `Contracts__ExpectedDeploymentNetwork` matches the manifest `network` exactly (case-insensitive). If configured, `Contracts__ExpectedDeploymentChainId` must also match.
+3. The manifest must have `schemaVersion: 1`, numeric `chainId`, a required 64-hex `lifecycleId`, required four contract addresses, `parameters.stakingRequirement`, and `parameters.maxContributors`. Manifest values are authoritative; only explicit expected network/chain pins fail startup on conflict.
 4. Verify the RPC's `eth_chainId` and bytecode at all four addresses. Do not log or paste the RPC URL if it contains credentials.
 5. For a production fingerprint mismatch, retain the old snapshot for forensics and start only after selecting the correct deployment/state or replaying canonical events. Only explicit LocalDev/localhost may auto-quarantine stale state.
 

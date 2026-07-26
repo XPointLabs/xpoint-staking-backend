@@ -52,20 +52,22 @@ State persistence behavior:
     "RewardRatePoolAddress": "0x...",
     "StakingRequirementAtomic": 25000000000000,
     "DeploymentManifestPath": "/run/deep-contracts/localhost.latest.json",
-    "ExpectedDeploymentNetwork": "localhost"
+    "ExpectedDeploymentNetwork": "localhost",
+    "ExpectedDeploymentChainId": 31337
   }
 }
 ```
 
 When `Contracts:DeploymentManifestPath` is configured, startup reads it before
 DI and fails closed if it is missing, malformed, has `schemaVersion` other than
-`1`, has a network/chain/config mismatch, or lacks any required contract or
+`1`, has an expected network/chain pin mismatch, or lacks any required contract or
 staking parameter. Its chain ID, network, addresses, staking requirement and
 max contributors are authoritative. The required JSON fields are
-`schemaVersion`, `network`, numeric `chainId`, optional 64-hex `lifecycleId`,
+`schemaVersion`, `network`, numeric `chainId`, required 64-hex `lifecycleId`,
 `contracts.{token,serviceNodeRewards,rewardRatePool,serviceNodeContributionFactory}`
 and `parameters.{stakingRequirement,maxContributors}`. Use
-`Contracts__DeploymentManifestPath` and `Contracts__ExpectedDeploymentNetwork`
+`Contracts__DeploymentManifestPath`, `Contracts__ExpectedDeploymentNetwork`,
+and (when pinning chain identity) `Contracts__ExpectedDeploymentChainId`
 for container configuration.
 
 `/health/live` only reports process liveness. `/health/ready` additionally

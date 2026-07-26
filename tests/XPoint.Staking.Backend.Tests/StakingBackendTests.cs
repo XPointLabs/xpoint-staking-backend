@@ -10,7 +10,7 @@ namespace XPoint.Staking.Backend.Tests;
 public sealed class StakingBackendTests
 {
     [Fact]
-    public void DeploymentManifestBinding_LoadsAuthoritativeValuesAndRejectsMismatches()
+    public void DeploymentManifestBinding_LoadsAuthoritativeValuesAndRejectsExpectedPinMismatches()
     {
         var path = Path.Combine(Path.GetTempPath(), $"staking-manifest-{Guid.NewGuid():N}.json");
         File.WriteAllText(path, DeploymentManifestJson());
@@ -31,11 +31,41 @@ public sealed class StakingBackendTests
             {
                 ["Contracts:DeploymentManifestPath"] = path,
                 ["Contracts:ExpectedDeploymentNetwork"] = "localhost",
-                ["Contracts:TokenAddress"] = "0x9999999999999999999999999999999999999999"
+                ["Contracts:ExpectedDeploymentChainId"] = "1"
             }).Build();
             Assert.Throws<InvalidOperationException>(() => DeploymentManifestBinding.Load(conflict));
         }
         finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public async Task DeploymentManifest_OverridesStockAppSettingsForLocalhost()
+    {
+        var manifestPath = Path.Combine(Path.GetTempPath(), $"staking-manifest-stock-{Guid.NewGuid():N}.json");
+        File.WriteAllText(manifestPath, DeploymentManifestJson());
+        var oldPath = Environment.GetEnvironmentVariable("Contracts__DeploymentManifestPath");
+        var oldNetwork = Environment.GetEnvironmentVariable("Contracts__ExpectedDeploymentNetwork");
+        var oldChainId = Environment.GetEnvironmentVariable("Contracts__ExpectedDeploymentChainId");
+        try
+        {
+            Environment.SetEnvironmentVariable("Contracts__DeploymentManifestPath", manifestPath);
+            Environment.SetEnvironmentVariable("Contracts__ExpectedDeploymentNetwork", "localhost");
+            Environment.SetEnvironmentVariable("Contracts__ExpectedDeploymentChainId", "31337");
+            await using var factory = CreateFactory();
+            using var client = factory.CreateClient();
+            var info = await client.GetFromJsonAsync<JsonElement>("/info");
+
+            Assert.Equal(31337, info.GetProperty("contracts").GetProperty("chainId").GetInt64());
+            Assert.Equal("localhost", info.GetProperty("contracts").GetProperty("networkName").GetString());
+            Assert.Equal(100, info.GetProperty("contracts").GetProperty("stakingRequirementAtomic").GetInt64());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("Contracts__DeploymentManifestPath", oldPath);
+            Environment.SetEnvironmentVariable("Contracts__ExpectedDeploymentNetwork", oldNetwork);
+            Environment.SetEnvironmentVariable("Contracts__ExpectedDeploymentChainId", oldChainId);
+            File.Delete(manifestPath);
+        }
     }
 
     [Fact]
@@ -58,6 +88,19 @@ public sealed class StakingBackendTests
             Assert.Throws<InvalidOperationException>(() => DeploymentManifestBinding.Load(corrupt));
         }
         finally { File.Delete(path); }
+
+        var noLifecyclePath = Path.Combine(Path.GetTempPath(), $"staking-manifest-no-lifecycle-{Guid.NewGuid():N}.json");
+        File.WriteAllText(noLifecyclePath, DeploymentManifestJson().Replace("\"lifecycleId\"", "\"removedLifecycleId\"", StringComparison.Ordinal));
+        try
+        {
+            var noLifecycle = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Contracts:DeploymentManifestPath"] = noLifecyclePath,
+                ["Contracts:ExpectedDeploymentNetwork"] = "localhost"
+            }).Build();
+            Assert.Throws<InvalidOperationException>(() => DeploymentManifestBinding.Load(noLifecycle));
+        }
+        finally { File.Delete(noLifecyclePath); }
     }
 
     [Fact]

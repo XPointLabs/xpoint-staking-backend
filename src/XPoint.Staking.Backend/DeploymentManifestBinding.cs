@@ -53,16 +53,11 @@ public sealed record DeploymentManifestBinding(
                 RequireAddress(RequireObject(root, "contracts"), "rewardRatePool"),
                 RequireLong(RequireObject(root, "parameters"), "stakingRequirement"),
                 checked((int)RequireLong(RequireObject(root, "parameters"), "maxContributors")),
-                GetLifecycleId(root));
+                RequireLifecycleId(root));
 
             if (binding.ChainId <= 0 || binding.StakingRequirementAtomic <= 0 || binding.MaxContributors <= 0)
             {
                 throw new InvalidOperationException("Deployment manifest contains non-positive chain parameters.");
-            }
-
-            if (binding.LifecycleId is not null && (binding.LifecycleId.Length != 64 || !binding.LifecycleId.All(Uri.IsHexDigit)))
-            {
-                throw new InvalidOperationException("Deployment manifest lifecycleId must be a 32-byte hexadecimal value.");
             }
 
             binding.ValidateConfiguredValues(configuration);
@@ -94,14 +89,7 @@ public sealed record DeploymentManifestBinding(
             throw new InvalidOperationException("Contracts:ExpectedDeploymentNetwork is required when Contracts:DeploymentManifestPath is configured.");
         }
         MatchString(configuration, "Contracts:ExpectedDeploymentNetwork", Network);
-        MatchLong(configuration, "Contracts:ChainId", ChainId);
-        MatchString(configuration, "Contracts:NetworkName", Network);
-        MatchAddress(configuration, "Contracts:TokenAddress", TokenAddress);
-        MatchAddress(configuration, "Contracts:ServiceNodeRewardsAddress", ServiceNodeRewardsAddress);
-        MatchAddress(configuration, "Contracts:ServiceNodeContributionFactoryAddress", ServiceNodeContributionFactoryAddress);
-        MatchAddress(configuration, "Contracts:RewardRatePoolAddress", RewardRatePoolAddress);
-        MatchLong(configuration, "Contracts:StakingRequirementAtomic", StakingRequirementAtomic);
-        MatchLong(configuration, "Contracts:MaxStakers", MaxContributors);
+        MatchLong(configuration, "Contracts:ExpectedDeploymentChainId", ChainId);
     }
 
     private static void RequireSchemaVersion(JsonElement root)
@@ -129,16 +117,6 @@ public sealed record DeploymentManifestBinding(
     {
         var configured = configuration[key];
         if (!string.IsNullOrWhiteSpace(configured) && !string.Equals(configured.Trim(), expected, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidOperationException($"{key} conflicts with Contracts:DeploymentManifestPath.");
-        }
-    }
-
-    private static void MatchAddress(IConfiguration configuration, string key, string expected)
-    {
-        var configured = configuration[key];
-        if (!string.IsNullOrWhiteSpace(configured)
-            && !string.Equals(EthereumJsonRpcClient.NormalizeAddress(configured), expected, StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidOperationException($"{key} conflicts with Contracts:DeploymentManifestPath.");
         }
@@ -175,15 +153,13 @@ public sealed record DeploymentManifestBinding(
         return result;
     }
 
-    private static string? GetLifecycleId(JsonElement root)
+    private static string RequireLifecycleId(JsonElement root)
     {
-        if (root.TryGetProperty("lifecycleId", out var direct) && direct.ValueKind == JsonValueKind.String)
+        var lifecycleId = RequireString(root, "lifecycleId");
+        if (lifecycleId.Length != 64 || !lifecycleId.All(Uri.IsHexDigit))
         {
-            return direct.GetString()?.Trim();
+            throw new InvalidOperationException("Deployment manifest lifecycleId must be a 32-byte hexadecimal value.");
         }
-        return root.TryGetProperty("lifecycle", out var lifecycle)
-            && lifecycle.ValueKind == JsonValueKind.Object
-            && lifecycle.TryGetProperty("id", out var id)
-            && id.ValueKind == JsonValueKind.String ? id.GetString()?.Trim() : null;
+        return lifecycleId.ToLowerInvariant();
     }
 }

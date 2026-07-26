@@ -85,6 +85,7 @@ public sealed record BackendContractOptions
     public string EthereumFallbackRpcUrls { get; init; } = "";
     public string? DeploymentManifestPath { get; init; }
     public string? ExpectedDeploymentNetwork { get; init; }
+    public long? ExpectedDeploymentChainId { get; init; }
     public string? DeploymentLifecycleId { get; init; }
     public int ReadinessTimeoutSeconds { get; init; } = 5;
     public string TokenAddress { get; init; } = "";

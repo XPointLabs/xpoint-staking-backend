@@ -7,7 +7,6 @@ Session reward/stake semantics at the API projection layer and uses XPoint
 ## Agent Specs
 
 - Start with [`AGENTS.md`](AGENTS.md) before changing event ingestion, projections, persistence, or API behavior.
-- Use [`docs/SESSION_PORTING.md`](docs/SESSION_PORTING.md) for Session staking/reward projection migration rules.
 - Contract source of truth remains `xpoint-staking-contracts`; this service indexes and projects events.
 
 ## Endpoints

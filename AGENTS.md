@@ -1,93 +1,33 @@
-﻿# Agent Specification - Deep Staking Backend
+# XPoint Staking Backend agent rules
 
-Last updated: 2026-06-10.
+The workspace rules in `../AGENTS.md` apply. This file contains only projection-backend deltas.
 
-## Mission
+## Owns
 
-`xpoint-staking-backend` owns replay-safe indexing and HTTP projection of XPNT staking/reward state for Deep. It bridges contract events into registry/client/operator APIs while preserving Session reward/stake semantics at the projection layer.
+- Replay-safe chain event ingestion and deterministic staking/reward projections.
+- HTTP projection APIs consumed by registry, portal and operators.
+- Snapshot persistence, corruption quarantine, runtime counters and degraded readiness.
 
-## Source Of Truth
+Solidity economics belong in `xpoint-staking-contracts`; registry storage belongs in
+`deep-registry-api`; chain/service deployment belongs in `deep-devops`.
 
-- Workspace entry point: `../prompts/00_Agent_Entry_Point.md`.
-- Operations runbook: `docs/OPERATIONS_RUNBOOK.md`.
-- Porting rules: `docs/SESSION_PORTING.md`.
-- Contract semantics: `../xpoint-staking-contracts/AGENTS.md`.
-- Registry consumer: `../deep-registry-api/AGENTS.md`.
+## Repository rules
 
-## Ownership Boundaries
+- Event identity is `(chainId, transactionHash, logIndex)` and replay is idempotent.
+- Project only contract-emitted semantics; never reimplement or reinterpret economics here.
+- Contract addresses, chain ID, staking requirement and RPC endpoints come from a validated
+  deployment manifest/configuration, never source constants.
+- Stale, partial or corrupt state cannot report healthy; quarantine with bounded diagnostics.
+- Reorg/replay handling must be deterministic and expose duplicate, stale and failure counters.
+- Never log RPC credentials, raw signer material or sensitive provider responses.
+- Update registry/portal consumers and `docs/OPERATIONS_RUNBOOK.md` for API, manifest or recovery
+  changes.
 
-Owned here:
-
-- event ingestion API,
-- idempotent replay handling,
-- staking/reward projection models,
-- state snapshot persistence and corruption quarantine,
-- runtime stats and degraded-mode diagnostics,
-- backend API tests.
-
-Not owned here:
-
-- Solidity contract semantics,
-- deployment scripts,
-- registry storage,
-- client UI.
-
-## New Deep Solution Rules
-
-Backend changes must preserve:
-
-- idempotency on `(chainId, transactionHash, logIndex)`,
-- deterministic event replay,
-- explicit duplicate/stale/error counters,
-- corrupted state quarantine,
-- configuration-driven contract addresses and staking requirement,
-- clean restart/recovery process.
-
-Do not bake local devnet addresses or production addresses into code. Use configuration.
-
-## Session Compatibility Rules
-
-Preserve Session-visible staking/reward concepts:
-
-- service node stake state,
-- reward address/accounting projection,
-- contribution state,
-- unlock/exit semantics as emitted by contracts,
-- staking requirement in atomic XPNT units.
-
-If a semantic belongs to contract execution, implement it in contracts first, then project it here.
-
-## Required Verification
+## Verify
 
 ```powershell
 dotnet test XPoint.Staking.Backend.slnx
 ```
 
-For production/recovery changes, also run DevOps readiness or recovery gates that consume `/api/events/stats`.
-
-## Acceptance Gates
-
-A backend change is complete only when:
-
-- replay/idempotency tests cover changed event behavior,
-- stats expose new recovery or failure modes,
-- config docs are updated for new contract fields,
-- registry/e2e consumers are updated for API changes,
-- corrupted state recovery still works.
-
-## Stop-The-Line Conditions
-
-- Duplicate event replay changes projected balances/state.
-- Stale or corrupted state is accepted silently.
-- Contract semantics are reimplemented differently from Solidity.
-- Registry can read a partial projection as healthy.
-- Secrets/RPC credentials are logged or written into artifacts.
-
-## Agent Workflow
-
-1. Read this file and `docs/SESSION_PORTING.md`.
-2. Check contract event definitions and backend tests.
-3. Add replay/idempotency tests first.
-4. Implement projection changes.
-5. Run solution tests and relevant DevOps gates.
-6. Update operations docs for recovery/config changes.
+Add focused replay/idempotency and recovery tests for changed event behavior, then run the DevOps
+gate that consumes `/api/events/stats` for release-path changes.
